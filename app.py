@@ -6,132 +6,122 @@ import time
 # --- Page Config ---
 st.set_page_config(page_title="Polkadot Fee & Transfer Fetcher", page_icon="🪙", layout="wide")
 
-# --- App Title & Instructions ---
-st.title("🪙 Polkadot Subscan Data Fetcher")
+# --- App Title ---
+st.title("🪙 Polkadot Subscan Data Fetcher (Fixed)")
 st.markdown("""
-This app automates fetching details from Polkadot Subscan.
-It now captures:
-1. **Estimated Fee**
-2. **Used Fee**
-3. **Asset Transfer Amount** (The quantity sent, e.g., 12,467 DOT)
-
 **Instructions:**
-1. Upload a CSV file containing Transaction Hashes.
-2. Select the column that holds the hash.
+1. Upload your CSV.
+2. Select the Hash column.
 3. Click "Fetch Data".
 """)
 
-# --- Sidebar: API Configuration ---
+# --- Sidebar ---
 st.sidebar.header("Configuration")
-api_key = st.sidebar.text_input("Subscan API Key (Optional)", type="password", help="Get a free key from https://support.subscan.io/ to avoid rate limits.")
-sleep_time = st.sidebar.slider("Seconds between requests", min_value=0.1, max_value=2.0, value=0.4)
+api_key = st.sidebar.text_input("Subscan API Key (Optional)", type="password")
+sleep_time = st.sidebar.slider("Seconds between requests", 0.1, 2.0, 0.4)
+
+# --- Helper Function to Format DOT ---
+def format_dot(raw_amount, decimals=10):
+    try:
+        # Convert raw string/int to float and divide by 10^10
+        val = float(raw_amount) / (10 ** decimals)
+        return f"{val:,.4f} DOT"
+    except:
+        return None
 
 # --- Main Logic ---
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
-    st.subheader("Preview of Uploaded Data")
     st.dataframe(df.head())
 
-    # Column Selector
     columns = df.columns.tolist()
-    hash_col = st.selectbox("Select the column containing Transaction Hash (Tx Hash)", columns)
+    hash_col = st.selectbox("Select Transaction Hash Column", columns)
 
     if st.button("Fetch Data"):
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # API Headers
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Streamlit App)"
-        }
-        if api_key:
-            headers["X-API-Key"] = api_key
+        headers = {"Content-Type": "application/json", "User-Agent": "StreamlitApp"}
+        if api_key: headers["X-API-Key"] = api_key
 
         total_tx = len(df)
         
         for index, row in df.iterrows():
             tx_hash = str(row[hash_col]).strip()
-            
-            # API Endpoint
             url = "https://polkadot.api.subscan.io/api/scan/extrinsic"
-            payload = {"hash": tx_hash}
-
-            # Default values
-            estimated_fee = None
-            used_fee = None
-            transfer_amount = None
-            status = "Pending"
+            
+            # Init variables
+            est_fee = used_fee = transfer_amount = None
+            status_msg = "Pending"
 
             try:
-                response = requests.post(url, json=payload, headers=headers)
+                response = requests.post(url, json={"hash": tx_hash}, headers=headers)
                 data = response.json()
                 
                 if response.status_code == 200 and data.get('message') == 'Success':
-                    extrinsic_data = data.get('data', {})
+                    ex_data = data.get('data', {})
                     
-                    if extrinsic_data:
-                        # 1. Get Fees
-                        estimated_fee = extrinsic_data.get('fee', '0')
-                        used_fee = extrinsic_data.get('fee_used', '0')
+                    if ex_data:
+                        # 1. Get Fees (Handle huge integers by treating as float first if needed)
+                        # Subscan fees are usually raw, so we assume 10 decimals for fees too if you want them formatted
+                        # But your request showed raw integers for fees, so we keep them raw or basic formatted.
+                        est_fee = ex_data.get('fee', '0')
+                        used_fee = ex_data.get('fee_used', '0')
 
-                        # 2. Get Transfer Amount
-                        # Subscan puts simple transfers in a 'transfer' object
-                        transfer_info = extrinsic_data.get('transfer')
+                        # 2. Get Transfer Amount (The Robust Logic)
                         
-                        if transfer_info:
-                            raw_amount = float(transfer_info.get('amount', 0))
-                            decimals = int(transfer_info.get('decimals', 10)) # Default to 10 if missing
-                            symbol = transfer_info.get('symbol', 'DOT')
+                        # PLAN A: Check for direct 'transfer' object
+                        transfer_obj = ex_data.get('transfer')
+                        
+                        if transfer_obj:
+                            raw = transfer_obj.get('amount')
+                            transfer_amount = format_dot(raw)
                             
-                            # Convert raw units to readable DOT (e.g. 10000000000 -> 1.0)
-                            readable_amount = raw_amount / (10 ** decimals)
-                            transfer_amount = f"{readable_amount:,.4f} {symbol}" # Format with commas
+                        # PLAN B: Check 'params' (Common for transfer_allow_death)
                         else:
-                            # If no direct transfer object, it might be a different type of transaction
-                            transfer_amount = "N/A (Not a simple transfer)"
-
-                        status = "Success"
+                            params = ex_data.get('params', [])
+                            found_param = False
+                            for p in params:
+                                # Look for a parameter named 'value' (standard for balance transfers)
+                                if p.get('name') == 'value':
+                                    transfer_amount = format_dot(p.get('value'))
+                                    found_param = True
+                                    break
+                            
+                            if not found_param:
+                                transfer_amount = "N/A (Complex Tx)"
+                        
+                        status_msg = "Success"
                     else:
-                        status = "Not Found"
+                        status_msg = "Not Found"
                 else:
-                    status = f"API Error: {data.get('message', 'Unknown')}"
+                    status_msg = f"API Error: {data.get('message')}"
 
             except Exception as e:
-                status = f"Error: {str(e)}"
+                status_msg = f"Error: {str(e)}"
 
-            # Append to results
             results.append({
                 "Tx Hash": tx_hash,
-                "Estimated Fee": estimated_fee,
+                "Estimated Fee": est_fee,
                 "Used Fee": used_fee,
                 "Transfer Amount": transfer_amount,
-                "Status": status
+                "Status": status_msg
             })
 
-            # Update Progress
-            progress = (index + 1) / total_tx
-            progress_bar.progress(progress)
+            progress_bar.progress((index + 1) / total_tx)
             status_text.text(f"Processing {index + 1}/{total_tx}...")
-            
-            # Rate limit sleep
             time.sleep(sleep_time)
 
-        # Final Output
-        status_text.text("Processing Complete!")
-        results_df = pd.DataFrame(results)
+        status_text.success("Done!")
+        res_df = pd.DataFrame(results)
+        st.dataframe(res_df)
         
-        st.subheader("Results")
-        st.dataframe(results_df)
-
-        # CSV Download
-        csv = results_df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="Download Results as CSV",
-            data=csv,
-            file_name='polkadot_data_captured.csv',
-            mime='text/csv',
+            "Download CSV",
+            res_df.to_csv(index=False).encode('utf-8'),
+            "polkadot_data_fixed.csv",
+            "text/csv"
         )
