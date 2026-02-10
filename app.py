@@ -4,22 +4,26 @@ import requests
 import time
 
 # --- Page Config ---
-st.set_page_config(page_title="Polkadot Fee Fetcher", page_icon="🪙")
+st.set_page_config(page_title="Polkadot Fee & Transfer Fetcher", page_icon="🪙", layout="wide")
 
 # --- App Title & Instructions ---
-st.title("🪙 Polkadot Subscan Fee Fetcher")
+st.title("🪙 Polkadot Subscan Data Fetcher")
 st.markdown("""
-This app automates fetching **Estimated Fee** and **Used Fee** from Polkadot Subscan.
+This app automates fetching details from Polkadot Subscan.
+It now captures:
+1. **Estimated Fee**
+2. **Used Fee**
+3. **Asset Transfer Amount** (The quantity sent, e.g., 12,467 DOT)
+
+**Instructions:**
 1. Upload a CSV file containing Transaction Hashes.
 2. Select the column that holds the hash.
-3. The app will query Subscan for each transaction and retrieve the fees.
+3. Click "Fetch Data".
 """)
 
 # --- Sidebar: API Configuration ---
 st.sidebar.header("Configuration")
-api_key = st.sidebar.text_input("Subscan API Key (Recommended)", type="password", help="Get a free key from https://support.subscan.io/ to avoid rate limits.")
-
-# Rate limit setting: Free tier usually allows ~2 requests/sec, but we go slower to be safe.
+api_key = st.sidebar.text_input("Subscan API Key (Optional)", type="password", help="Get a free key from https://support.subscan.io/ to avoid rate limits.")
 sleep_time = st.sidebar.slider("Seconds between requests", min_value=0.1, max_value=2.0, value=0.4)
 
 # --- Main Logic ---
@@ -27,20 +31,19 @@ uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
-    st.write("Preview of uploaded data:")
+    st.subheader("Preview of Uploaded Data")
     st.dataframe(df.head())
 
     # Column Selector
     columns = df.columns.tolist()
     hash_col = st.selectbox("Select the column containing Transaction Hash (Tx Hash)", columns)
 
-    if st.button("Fetch Fee Data"):
-        # Create placeholders for results
+    if st.button("Fetch Data"):
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Prepare headers
+        # API Headers
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Streamlit App)"
@@ -50,81 +53,85 @@ if uploaded_file is not None:
 
         total_tx = len(df)
         
-        # Iterate through rows
         for index, row in df.iterrows():
             tx_hash = str(row[hash_col]).strip()
             
-            # API Endpoint for Polkadot Extrinsics
+            # API Endpoint
             url = "https://polkadot.api.subscan.io/api/scan/extrinsic"
             payload = {"hash": tx_hash}
+
+            # Default values
+            estimated_fee = None
+            used_fee = None
+            transfer_amount = None
+            status = "Pending"
 
             try:
                 response = requests.post(url, json=payload, headers=headers)
                 data = response.json()
                 
-                # Check if request was successful
                 if response.status_code == 200 and data.get('message') == 'Success':
                     extrinsic_data = data.get('data', {})
                     
                     if extrinsic_data:
-                        # Capture the specific fields requested
-                        # Subscan API usually returns 'fee' (Total/Estimated) and 'fee_used' (Used)
-                        estimated_fee = extrinsic_data.get('fee', 'N/A')
-                        used_fee = extrinsic_data.get('fee_used', 'N/A')
+                        # 1. Get Fees
+                        estimated_fee = extrinsic_data.get('fee', '0')
+                        used_fee = extrinsic_data.get('fee_used', '0')
+
+                        # 2. Get Transfer Amount
+                        # Subscan puts simple transfers in a 'transfer' object
+                        transfer_info = extrinsic_data.get('transfer')
                         
-                        # Format them to resemble the UI (adding DOT symbol logic if needed)
-                        # The API returns raw numbers usually formatted as strings or floats
-                        results.append({
-                            "Tx Hash": tx_hash,
-                            "Estimated Fee": estimated_fee,
-                            "Used Fee": used_fee,
-                            "Status": "Found"
-                        })
+                        if transfer_info:
+                            raw_amount = float(transfer_info.get('amount', 0))
+                            decimals = int(transfer_info.get('decimals', 10)) # Default to 10 if missing
+                            symbol = transfer_info.get('symbol', 'DOT')
+                            
+                            # Convert raw units to readable DOT (e.g. 10000000000 -> 1.0)
+                            readable_amount = raw_amount / (10 ** decimals)
+                            transfer_amount = f"{readable_amount:,.4f} {symbol}" # Format with commas
+                        else:
+                            # If no direct transfer object, it might be a different type of transaction
+                            transfer_amount = "N/A (Not a simple transfer)"
+
+                        status = "Success"
                     else:
-                         results.append({
-                            "Tx Hash": tx_hash,
-                            "Estimated Fee": None,
-                            "Used Fee": None,
-                            "Status": "Not Found"
-                        })
+                        status = "Not Found"
                 else:
-                    results.append({
-                        "Tx Hash": tx_hash,
-                        "Estimated Fee": None,
-                        "Used Fee": None,
-                        "Status": f"Error: {data.get('message', 'Unknown')}"
-                    })
+                    status = f"API Error: {data.get('message', 'Unknown')}"
 
             except Exception as e:
-                results.append({
-                    "Tx Hash": tx_hash,
-                    "Estimated Fee": None,
-                    "Used Fee": None,
-                    "Status": f"Exception: {str(e)}"
-                })
+                status = f"Error: {str(e)}"
 
-            # Update progress
+            # Append to results
+            results.append({
+                "Tx Hash": tx_hash,
+                "Estimated Fee": estimated_fee,
+                "Used Fee": used_fee,
+                "Transfer Amount": transfer_amount,
+                "Status": status
+            })
+
+            # Update Progress
             progress = (index + 1) / total_tx
             progress_bar.progress(progress)
-            status_text.text(f"Processing {index + 1}/{total_tx}: {tx_hash[:10]}...")
+            status_text.text(f"Processing {index + 1}/{total_tx}...")
             
-            # Sleep to prevent getting banned by Subscan
+            # Rate limit sleep
             time.sleep(sleep_time)
 
-        # Final Processing
+        # Final Output
         status_text.text("Processing Complete!")
         results_df = pd.DataFrame(results)
         
-        # Merge with original data (optional, or just show new data)
-        # We will display the new results dataframe
         st.subheader("Results")
         st.dataframe(results_df)
 
-        # Download Button
+        # CSV Download
         csv = results_df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="Download Data as CSV",
+            label="Download Results as CSV",
             data=csv,
-            file_name='polkadot_fees_captured.csv',
+            file_name='polkadot_data_captured.csv',
             mime='text/csv',
         )
