@@ -7,7 +7,7 @@ import time
 st.set_page_config(page_title="Polkadot Fee & Transfer Fetcher", page_icon="🪙", layout="wide")
 
 # --- App Title ---
-st.title("🪙 Polkadot Subscan Data Fetcher (Fixed)")
+st.title("🪙 Polkadot Subscan Data Fetcher (Exact Amounts)")
 st.markdown("""
 **Instructions:**
 1. Upload your CSV.
@@ -20,12 +20,17 @@ st.sidebar.header("Configuration")
 api_key = st.sidebar.text_input("Subscan API Key (Optional)", type="password")
 sleep_time = st.sidebar.slider("Seconds between requests", 0.1, 2.0, 0.4)
 
-# --- Helper Function to Format DOT ---
+# --- Helper Function to Format DOT (Fixed for Full Precision) ---
 def format_dot(raw_amount, decimals=10):
     try:
         # Convert raw string/int to float and divide by 10^10
         val = float(raw_amount) / (10 ** decimals)
-        return f"{val:,.4f} DOT"
+        
+        # Format with 10 decimal places (standard for DOT) to capture everything
+        # Then strip trailing zeros for cleaner look if it's a whole number
+        formatted_val = f"{val:,.10f}".rstrip('0').rstrip('.')
+        
+        return f"{formatted_val} DOT"
     except:
         return None
 
@@ -54,7 +59,9 @@ if uploaded_file is not None:
             url = "https://polkadot.api.subscan.io/api/scan/extrinsic"
             
             # Init variables
-            est_fee = used_fee = transfer_amount = None
+            est_fee = None
+            used_fee = None
+            transfer_amount = None
             status_msg = "Pending"
 
             try:
@@ -65,34 +72,35 @@ if uploaded_file is not None:
                     ex_data = data.get('data', {})
                     
                     if ex_data:
-                        # 1. Get Fees (Handle huge integers by treating as float first if needed)
-                        # Subscan fees are usually raw, so we assume 10 decimals for fees too if you want them formatted
-                        # But your request showed raw integers for fees, so we keep them raw or basic formatted.
-                        est_fee = ex_data.get('fee', '0')
-                        used_fee = ex_data.get('fee_used', '0')
+                        # 1. Get Fees
+                        # Capture raw fee first, then format same as amount
+                        raw_est_fee = ex_data.get('fee', '0')
+                        raw_used_fee = ex_data.get('fee_used', '0')
+                        
+                        est_fee = format_dot(raw_est_fee)
+                        used_fee = format_dot(raw_used_fee)
 
-                        # 2. Get Transfer Amount (The Robust Logic)
+                        # 2. Get Transfer Amount (Robust Logic)
                         
-                        # PLAN A: Check for direct 'transfer' object
-                        transfer_obj = ex_data.get('transfer')
+                        # Check params (most reliable for transfer_allow_death)
+                        params = ex_data.get('params', [])
+                        found_param = False
                         
-                        if transfer_obj:
-                            raw = transfer_obj.get('amount')
-                            transfer_amount = format_dot(raw)
-                            
-                        # PLAN B: Check 'params' (Common for transfer_allow_death)
-                        else:
-                            params = ex_data.get('params', [])
-                            found_param = False
-                            for p in params:
-                                # Look for a parameter named 'value' (standard for balance transfers)
-                                if p.get('name') == 'value':
-                                    transfer_amount = format_dot(p.get('value'))
-                                    found_param = True
-                                    break
-                            
-                            if not found_param:
-                                transfer_amount = "N/A (Complex Tx)"
+                        # First try finding 'value' in params
+                        for p in params:
+                            if p.get('name') == 'value':
+                                transfer_amount = format_dot(p.get('value'))
+                                found_param = True
+                                break
+                        
+                        # If not found in params, try the 'transfer' object (Plan B)
+                        if not found_param:
+                            transfer_obj = ex_data.get('transfer')
+                            if transfer_obj:
+                                raw = transfer_obj.get('amount')
+                                transfer_amount = format_dot(raw)
+                            else:
+                                transfer_amount = "N/A"
                         
                         status_msg = "Success"
                     else:
@@ -117,11 +125,12 @@ if uploaded_file is not None:
 
         status_text.success("Done!")
         res_df = pd.DataFrame(results)
+        st.subheader("Results")
         st.dataframe(res_df)
         
         st.download_button(
             "Download CSV",
             res_df.to_csv(index=False).encode('utf-8'),
-            "polkadot_data_fixed.csv",
+            "polkadot_exact_amounts.csv",
             "text/csv"
         )
